@@ -2,44 +2,38 @@
  * device-rotate-test.js - Improved Version
  * 
  * উন্নতি সমূহ:
- * - ইরর হ্যান্ডলিং উন্নত
- * - ব্রাউজার লঞ্চ অপ্টিমাইজড
- * - ডিভাইস প্রোফাইল ম্যানেজমেন্ট সহজ
- * - রিসোর্স লিক প্রতিরোধ
- * - বিস্তারিত লগিং
- * - গ্রেসফুল শাটডাউন
- *
- * Usage:
- *   1) npm install playwright
- *   2) npx playwright install
- *   3) node device-rotate-test.js https://your-test-url.example
+ * - Better 404 error handling
+ * - Enhanced network monitoring
+ * - Improved page status checking
+ * - Better screenshot management
  */
 
 const { chromium, devices } = require('playwright');
 const fs = require('fs').promises;
+const path = require('path');
 
-const INTERVAL = 60_000; // প্রতি রাউন্ডের বিরতি - 60000ms = 60s
-const SDK_WAIT = 20_000; // SDK init হওয়ার জন্য অপেক্ষার সময়
-const PAGE_LOAD_TIMEOUT = 60_000; // পেজ লোড টাইমআউট
+const INTERVAL = 60_000;
+const SDK_WAIT = 20_000;
+const PAGE_LOAD_TIMEOUT = 60_000;
 const SCREENSHOT_PREFIX = 'screenshot';
-const MAX_ITERATIONS = 1000; // সেফটি লিমিট
+const MAX_ITERATIONS = 1000;
 
-// ডিভাইস প্রোফাইল সংজ্ঞা - ফিক্সড
+// Screenshots directory create করবেন
+const SCREENSHOT_DIR = 'screenshots';
+
+// ডিভাইস প্রোফাইল সংজ্ঞা
 const deviceProfiles = [
   { 
     ...devices['iPhone 15 Pro'], 
-    name: 'iPhone 15 Pro',
-    viewport: devices['iPhone 15 Pro'].viewport 
+    name: 'iPhone 15 Pro'
   },
   { 
     ...devices['Pixel 6'], 
-    name: 'Pixel 6',
-    viewport: devices['Pixel 6'].viewport 
+    name: 'Pixel 6'
   },
   { 
     ...devices['iPad (gen 7)'], 
-    name: 'iPad (gen 7)',
-    viewport: devices['iPad (gen 7)'].viewport 
+    name: 'iPad (gen 7)'
   },
   { 
     name: 'Desktop Chrome',
@@ -51,16 +45,23 @@ const deviceProfiles = [
   },
   { 
     ...devices['Galaxy S23'], 
-    name: 'Galaxy S23',
-    viewport: devices['Galaxy S23'].viewport 
+    name: 'Galaxy S23'
   }
 ];
 
 // CLI আর্গুমেন্ট চেক
 const url = process.argv[2];
 if (!url) {
-  console.error('Usage: node device-rotate-test.js <TEST_URL>');
-  console.error('Example: node device-rotate-test.js https://example.com');
+  console.error('❌ Usage: node device-rotate-test.js <TEST_URL>');
+  console.error('📖 Example: node device-rotate-test.js https://example.com');
+  console.error('💡 Tips: URL must include http:// or https://');
+  process.exit(1);
+}
+
+// URL validation
+if (!url.startsWith('http://') && !url.startsWith('https://')) {
+  console.error('❌ Invalid URL format. Must start with http:// or https://');
+  console.error('💡 Example: https://example.com');
   process.exit(1);
 }
 
@@ -69,7 +70,7 @@ let isShuttingDown = false;
 let currentTest = null;
 
 process.on('SIGINT', async () => {
-  console.log('\nReceived SIGINT. Shutting down gracefully...');
+  console.log('\n🛑 Received SIGINT. Shutting down gracefully...');
   isShuttingDown = true;
   if (currentTest) {
     await currentTest.cleanup().catch(console.error);
@@ -78,7 +79,7 @@ process.on('SIGINT', async () => {
 });
 
 process.on('SIGTERM', async () => {
-  console.log('\nReceived SIGTERM. Shutting down gracefully...');
+  console.log('\n🛑 Received SIGTERM. Shutting down gracefully...');
   isShuttingDown = true;
   if (currentTest) {
     await currentTest.cleanup().catch(console.error);
@@ -95,6 +96,7 @@ class DeviceTester {
     this.context = null;
     this.page = null;
     this.cleanupCalled = false;
+    this.pageStatus = 'unknown';
   }
 
   async cleanup() {
@@ -122,26 +124,23 @@ class DeviceTester {
     }
 
     await Promise.allSettled(cleanupTasks);
-    this.page = null;
-    this.context = null;
-    this.browser = null;
   }
 
   async test() {
     try {
       console.log(`\n🚀 Starting test for device: ${this.profileName}`);
       
+      // Screenshot directory create করুন
+      await this.ensureScreenshotDir();
+
       // ব্রাউজার লঞ্চ করুন
       this.browser = await chromium.launch({ 
-        headless: true, // হেডলেস মোডে চালান for stability
+        headless: true,
         args: [
           '--disable-dev-shm-usage',
           '--no-sandbox',
           '--disable-setuid-sandbox',
-          '--disable-web-security',
-          '--disable-features=VizDisplayCompositor',
-          '--disable-gpu',
-          '--disable-software-rasterizer'
+          '--disable-web-security'
         ],
         timeout: 30000
       });
@@ -153,9 +152,7 @@ class DeviceTester {
         deviceScaleFactor: this.profile.deviceScaleFactor || 1,
         isMobile: this.profile.isMobile || false,
         hasTouch: this.profile.hasTouch || false,
-        locale: this.profile.locale || 'en-US',
-        ignoreHTTPSErrors: true,
-        javaScriptEnabled: true
+        ignoreHTTPSErrors: true
       });
 
       // পেজ তৈরি করুন
@@ -166,16 +163,15 @@ class DeviceTester {
 
       console.log(`📱 Device: ${this.profileName}`);
       console.log(`📏 Viewport: ${this.profile.viewport?.width}x${this.profile.viewport?.height}`);
-      console.log(`🌐 User Agent: ${this.profile.userAgent?.substring(0, 80)}...`);
       console.log(`🔗 Loading URL: ${url}`);
 
       // পেজ লোড করুন with better error handling
       await this.loadPage();
 
-      console.log('✅ Page loaded successfully');
-      console.log(`⏳ Waiting ${SDK_WAIT/1000}s for SDK initialization...`);
+      // পেজ স্ট্যাটাস চেক করুন
+      await this.checkPageStatus();
 
-      // SDK ইনিশিয়ালাইজেশনের জন্য অপেক্ষা করুন
+      console.log(`⏳ Waiting ${SDK_WAIT/1000}s for SDK initialization...`);
       await this.page.waitForTimeout(SDK_WAIT);
 
       // স্ক্রিনশট নিন
@@ -190,89 +186,155 @@ class DeviceTester {
       console.error(`❌ Error testing device ${this.profileName}:`, error.message);
       await this.takeErrorScreenshot();
       return false;
-
     } finally {
       await this.cleanup();
     }
   }
 
+  async ensureScreenshotDir() {
+    try {
+      await fs.access(SCREENSHOT_DIR);
+    } catch {
+      await fs.mkdir(SCREENSHOT_DIR, { recursive: true });
+      console.log(`📁 Created screenshot directory: ${SCREENSHOT_DIR}`);
+    }
+  }
+
   setupEventHandlers() {
-    // কনসোল লগ ক্যাপচার করুন
-    this.page.on('console', msg => {
-      const logText = msg.text();
-      const type = msg.type();
-      if (type === 'error' || type === 'warning') {
-        console.log(`[${this.profileName}] [${type.toUpperCase()}] ${logText}`);
+    // Network responses monitor
+    this.page.on('response', response => {
+      const status = response.status();
+      if (status >= 400) {
+        console.warn(`[${this.profileName}] HTTP ${status}: ${response.url()}`);
+        
+        if (status === 404) {
+          this.pageStatus = '404';
+          console.error(`❌ 404 Page Not Found: ${response.url()}`);
+        }
       }
     });
 
-    // পেজ এরর হ্যান্ডলিং
+    // Console errors
+    this.page.on('console', msg => {
+      if (msg.type() === 'error') {
+        console.log(`[${this.profileName}] Console Error: ${msg.text()}`);
+      }
+    });
+
+    // Page errors
     this.page.on('pageerror', error => {
       console.error(`[${this.profileName}] Page Error:`, error.message);
     });
 
-    // নেটওয়ার্ক রিকোয়েস্ট লগ করুন
+    // Request failures
     this.page.on('requestfailed', request => {
       const failure = request.failure();
       if (failure) {
         console.error(`[${this.profileName}] Request Failed: ${request.url()} - ${failure.errorText}`);
       }
     });
-
-    // রেসপন্স হ্যান্ডলিং
-    this.page.on('response', response => {
-      if (!response.ok()) {
-        console.warn(`[${this.profileName}] HTTP ${response.status(): ${response.url()}`);
-      }
-    });
   }
 
   async loadPage() {
     try {
-      await this.page.goto(url, { 
-        waitUntil: 'networkidle',
+      const response = await this.page.goto(url, { 
+        waitUntil: 'domcontentloaded',
         timeout: PAGE_LOAD_TIMEOUT 
       });
+
+      if (!response) {
+        throw new Error('No response received from page load');
+      }
+
+      const status = response.status();
+      console.log(`📊 HTTP Status: ${status}`);
+
+      if (status >= 400) {
+        throw new Error(`HTTP ${status} - ${response.statusText()}`);
+      }
+
     } catch (error) {
-      // networkidle ফেললে domcontentloaded try করুন
       if (error.name === 'TimeoutError') {
-        console.log('Trying domcontentloaded as fallback...');
-        await this.page.goto(url, { 
-          waitUntil: 'domcontentloaded',
-          timeout: PAGE_LOAD_TIMEOUT 
-        });
+        console.log('⏰ Page load timeout, trying to continue...');
+        // Continue even if timeout
       } else {
         throw error;
       }
     }
   }
 
-  async takeScreenshot() {
-    const safeName = this.profileName.replace(/[^a-z0-9]/gi, '-');
-    const screenshotPath = `${SCREENSHOT_PREFIX}-${this.iteration}-${safeName}.png`;
-    
-    await this.page.screenshot({ 
-      path: screenshotPath, 
-      fullPage: true,
-      type: 'png',
-      quality: 80,
-      timeout: 10000
-    });
+  async checkPageStatus() {
+    try {
+      // Check for common error pages
+      const pageTitle = await this.page.title();
+      const pageContent = await this.page.content();
+      
+      if (pageTitle.includes('404') || pageTitle.includes('Not Found')) {
+        this.pageStatus = '404';
+        console.error('❌ 404 Error detected from page title');
+      }
+      
+      if (pageContent.includes('404') || pageContent.includes('Page Not Found')) {
+        this.pageStatus = '404';
+        console.error('❌ 404 Error detected from page content');
+      }
 
-    console.log(`📸 Screenshot saved: ${screenshotPath}`);
+      // Check for Netlify 404 page
+      if (pageContent.includes('Netlify') && pageContent.includes('page not found')) {
+        this.pageStatus = '404';
+        console.error('❌ Netlify 404 Page detected');
+      }
+
+      if (this.pageStatus === 'unknown') {
+        this.pageStatus = '200';
+        console.log('✅ Page appears to be loaded successfully');
+      }
+
+    } catch (error) {
+      console.error('Error checking page status:', error.message);
+    }
+  }
+
+  async takeScreenshot() {
+    try {
+      const safeName = this.profileName.replace(/[^a-z0-9]/gi, '-').toLowerCase();
+      const statusSuffix = this.pageStatus === '404' ? '-404-error' : '';
+      const screenshotPath = path.join(
+        SCREENSHOT_DIR, 
+        `${SCREENSHOT_PREFIX}-${this.iteration}-${safeName}${statusSuffix}.png`
+      );
+      
+      await this.page.screenshot({ 
+        path: screenshotPath, 
+        fullPage: true,
+        type: 'png',
+        quality: 80,
+        timeout: 10000
+      });
+
+      console.log(`📸 Screenshot saved: ${screenshotPath}`);
+
+    } catch (error) {
+      console.error('Error taking screenshot:', error.message);
+    }
   }
 
   async takeErrorScreenshot() {
     if (!this.page) return;
     
     try {
-      const safeName = this.profileName.replace(/[^a-z0-9]/gi, '-');
-      const errorScreenshotPath = `error-${SCREENSHOT_PREFIX}-${this.iteration}-${safeName}.png`;
+      const safeName = this.profileName.replace(/[^a-z0-9]/gi, '-').toLowerCase();
+      const screenshotPath = path.join(
+        SCREENSHOT_DIR,
+        `error-${SCREENSHOT_PREFIX}-${this.iteration}-${safeName}.png`
+      );
+      
       await this.page.screenshot({ 
-        path: errorScreenshotPath,
+        path: screenshotPath,
         timeout: 5000 
       });
-      console.log(`📸 Error screenshot saved: ${errorScreenshotPath}`);
+      
+      console.log(`📸 Error screenshot saved: ${screenshotPath}`);
     } catch (screenshotError) {
       console.error('Failed to take error screenshot:', screenshotError.message);
     }
@@ -282,23 +344,19 @@ class DeviceTester {
     try {
       const pageTitle = await this.page.title();
       const currentUrl = this.page.url();
-      console.log(`📄 Page Title: ${pageTitle}`);
+      
+      console.log(`📄 Page Title: "${pageTitle}"`);
       console.log(`🔗 Current URL: ${currentUrl}`);
+      console.log(`📊 Page Status: ${this.pageStatus}`);
+
+      // Check if page is actually loaded
+      const bodyText = await this.page.evaluate(() => document.body.innerText);
+      console.log(`📝 Content length: ${bodyText.length} characters`);
+
     } catch (error) {
       console.error('Error collecting page info:', error.message);
     }
   }
-}
-
-/**
- * একটি ডিভাইস প্রোফাইলের জন্য টেস্ট রান করে
- */
-async function testWithDevice(profile, iteration) {
-  const tester = new DeviceTester(profile, iteration);
-  currentTest = tester;
-  const result = await tester.test();
-  currentTest = null;
-  return result;
 }
 
 /**
@@ -309,20 +367,20 @@ async function runTests() {
   console.log('📊 Target URL:', url);
   console.log('⏰ Interval:', INTERVAL/1000, 'seconds');
   console.log('🔄 Device Profiles:', deviceProfiles.length);
-  console.log('📁 Screenshot Prefix:', SCREENSHOT_PREFIX);
-  console.log('Press CTRL+C to stop the test\n');
+  console.log('📁 Screenshot Directory:', SCREENSHOT_DIR);
+  console.log('\n💡 Press CTRL+C to stop the test');
+  console.log('='.repeat(60));
 
   let iteration = 0;
   let successCount = 0;
   let errorCount = 0;
+  let page404Count = 0;
 
-  // স্ক্রিনশট ডিরেক্টরি চেক করুন
+  // Screenshot directory create করুন
   try {
-    await fs.access('./');
-    console.log('✅ Current directory is accessible for screenshots');
+    await fs.mkdir(SCREENSHOT_DIR, { recursive: true });
   } catch (error) {
-    console.error('❌ Cannot write to current directory:', error.message);
-    return;
+    console.error('Error creating screenshot directory:', error.message);
   }
 
   while (!isShuttingDown && iteration < MAX_ITERATIONS) {
@@ -334,10 +392,17 @@ async function runTests() {
     console.log(`📱 Device ${profileIndex + 1}/${deviceProfiles.length}: ${profile.name}`);
     console.log(`${'='.repeat(60)}`);
 
-    const success = await testWithDevice(profile, iteration);
+    const tester = new DeviceTester(profile, iteration);
+    currentTest = tester;
+    const success = await tester.test();
+    currentTest = null;
     
     if (success) {
       successCount++;
+      if (tester.pageStatus === '404') {
+        page404Count++;
+        console.error('🚨 404 ERROR DETECTED! The page was not found.');
+      }
     } else {
       errorCount++;
     }
@@ -345,71 +410,62 @@ async function runTests() {
     const totalTests = iteration + 1;
     const successRate = ((successCount / totalTests) * 100).toFixed(1);
     
-    console.log(`📊 Summary - Success: ${successCount}, Errors: ${errorCount}, Total: ${totalTests}, Success Rate: ${successRate}%`);
+    console.log(`\n📊 Summary:`);
+    console.log(`   ✅ Success: ${successCount}`);
+    console.log(`   ❌ Errors: ${errorCount}`);
+    console.log   (`   404 Pages: ${page404Count}`);
+    console.log(`   📈 Success Rate: ${successRate}%`);
+    console.log(`   🔄 Total Iterations: ${totalTests}`);
+
+    if (page404Count > 0) {
+      console.log(`\n🚨 ALERT: ${page404Count} tests detected 404 errors!`);
+      console.log(`💡 Check if the URL is correct: ${url}`);
+    }
 
     iteration++;
 
     // শেষ ইটারেশন না হলে অপেক্ষা করুন
     if (!isShuttingDown && iteration < MAX_ITERATIONS) {
-      console.log(`\n💤 Sleeping for ${INTERVAL/1000} seconds before next device...`);
-      
+      console.log(`\n💤 Sleeping for ${INTERVAL/1000} seconds...`);
       await sleepWithInterrupt(INTERVAL);
     }
   }
 
   console.log('\n✅ Test completed');
-  console.log(`🎯 Final Stats - Success: ${successCount}, Errors: ${errorCount}, Total Iterations: ${iteration}`);
+  console.log(`🎯 Final Stats - Success: ${successCount}, Errors: ${errorCount}, 404s: ${page404Count}`);
 }
 
-/**
- * ইন্টারাপ্ট করা যায় এমন স্লিপ ফাংশন
- */
 function sleepWithInterrupt(ms) {
   return new Promise(resolve => {
+    const timeout = setTimeout(resolve, ms);
+    
     const checkInterval = setInterval(() => {
       if (isShuttingDown) {
+        clearTimeout(timeout);
         clearInterval(checkInterval);
         resolve();
       }
     }, 1000);
-    
-    const timeout = setTimeout(() => {
-      clearInterval(checkInterval);
-      resolve();
-    }, ms);
-
-    // শাটডাউন হলে ক্লিয়ার করুন
-    if (isShuttingDown) {
-      clearTimeout(timeout);
-      clearInterval(checkInterval);
-      resolve();
-    }
   });
 }
 
-// আনহ্যান্ডল্ড প্রমিস রিজেকশন হ্যান্ডলিং
+// Error handling
 process.on('unhandledRejection', (reason, promise) => {
-  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
-  if (currentTest) {
-    currentTest.cleanup().catch(console.error);
-  }
+  console.error('Unhandled Rejection:', reason);
   process.exit(1);
 });
 
 process.on('uncaughtException', (error) => {
   console.error('Uncaught Exception:', error);
-  if (currentTest) {
-    currentTest.cleanup().catch(console.error);
-  }
   process.exit(1);
 });
 
-// প্রোগ্রাম 실행
 (async () => {
   try {
     await runTests();
   } catch (error) {
-    console.error('Fatal error in main execution:', error);
+    console.error('Fatal error:', error);
     process.exit(1);
   }
 })();
+
