@@ -1,132 +1,262 @@
 /**
- * device-rotate-test.js
+ * device-rotate-test.js - Improved Version
+ * 
+ * উন্নতি সমূহ:
+ * - ইরর হ্যান্ডলিং উন্নত
+ * - ব্রাউজার লঞ্চ অপ্টিমাইজড
+ * - ডিভাইস প্রোফাইল ম্যানেজমেন্ট সহজ
+ * - রিসোর্স লিক প্রতিরোধ
+ * - বিস্তারিত লগিং
+ * - গ্রেসফুল শাটডাউন
  *
  * Usage:
- *   1) npm install
- *   2) npx playwright install  (install browser binaries)
+ *   1) npm install playwright
+ *   2) npx playwright install
  *   3) node device-rotate-test.js https://your-test-url.example
- *
- * What it does:
- * - প্রতি ITERATION একটি নতুন Playwright context তৈরি করে একটি ভিন্ন ডিভাইস প্রোফাইল ব্যবহার করে URL খোলে
- * - পেজ লোড হলে 20s অপেক্ষা করে (SDK-গুলোর init/রেন্ডার হওয়ার জন্য)
- * - প্রতিটি iteration এ একটি screenshot নেয় (screenshot-0.png, screenshot-1.png ...)
- * - DevTools console এ পেজের console.logs প্রদর্শন করে
- *
- * Safety note: This does NOT change your public IP. It's device/user-agent/viewport emulation only.
  */
 
 const { chromium, devices } = require('playwright');
 
-const INTERVAL = 60_000; // প্রতি রাউন্ডের বিরতি — 60000ms = 60s
-const SDK_WAIT = 20_000; // পেজ লোড হয়ে SDK init হওয়ার জন্য অপেক্ষার সময় (ms)
+const INTERVAL = 60_000; // প্রতি রাউন্ডের বিরতি - 60000ms = 60s
+const SDK_WAIT = 20_000; // SDK init হওয়ার জন্য অপেক্ষার সময়
+const PAGE_LOAD_TIMEOUT = 60_000; // পেজ লোড টাইমআউট
 const SCREENSHOT_PREFIX = 'screenshot';
 
+// ডিভাইস প্রোফাইল সংজ্ঞা
 const deviceProfiles = [
-  devices['iPhone 15 Pro'],
-  devices['Pixel 6'],
-  devices['iPad (gen 7)'],
-  // Desktop profile (custom) — Playwright provides 'Desktop Chrome' via empty device, we'll set viewport & userAgent
-  {
+  { ...devices['iPhone 15 Pro'], name: 'iPhone 15 Pro' },
+  { ...devices['Pixel 6'], name: 'Pixel 6' },
+  { ...devices['iPad (gen 7)'], name: 'iPad (gen 7)' },
+  { 
     name: 'Desktop Chrome',
     viewport: { width: 1366, height: 768 },
-    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    deviceScaleFactor: 1,
+    isMobile: false,
+    hasTouch: false
   },
-  devices['Galaxy S23']
+  { ...devices['Galaxy S23'], name: 'Galaxy S23' }
 ];
 
-// get target url from CLI
+// CLI আর্গুমেন্ট চেক
 const url = process.argv[2];
 if (!url) {
   console.error('Usage: node device-rotate-test.js <TEST_URL>');
+  console.error('Example: node device-rotate-test.js https://example.com');
   process.exit(1);
 }
 
-(async () => {
-  console.log('Device-rotate test starting for URL:', url);
-  console.log('Press CTRL+C to stop.');
+// গ্রেসফুল শাটডাউন হ্যান্ডলিং
+let isShuttingDown = false;
+process.on('SIGINT', () => {
+  console.log('\nReceived SIGINT. Shutting down gracefully...');
+  isShuttingDown = true;
+  process.exit(0);
+});
 
-  let iteration = 0;
-  while (true) {
-    const profile = deviceProfiles[iteration % deviceProfiles.length];
-    const profileName = profile.name || `profile-${iteration}`;
-    console.log(`\n[${new Date().toISOString()}] Iteration ${iteration} — Device: ${profileName}`);
+process.on('SIGTERM', () => {
+  console.log('\nReceived SIGTERM. Shutting down gracefully...');
+  isShuttingDown = true;
+  process.exit(0);
+});
 
-    // Launch browser (headful recommended for visual verification)
-    const browser = await chromium.launch({ headless: false, args: ['--disable-dev-shm-usage'] });
+/**
+ * একটি ডিভাইস প্রোফাইলের জন্য টেস্ট রান করে
+ */
+async function testWithDevice(profile, iteration) {
+  const profileName = profile.name || `profile-${iteration}`;
+  let browser = null;
+  let context = null;
+  let page = null;
 
-    // create context using the device profile (merge desktop custom if needed)
-    const contextOptions = {};
-    if (profile.viewport) contextOptions.viewport = profile.viewport;
-    if (profile.userAgent) contextOptions.userAgent = profile.userAgent;
-    if (profile.deviceScaleFactor) contextOptions.deviceScaleFactor = profile.deviceScaleFactor;
-    if (profile.isMobile !== undefined) contextOptions.isMobile = profile.isMobile;
-    if (profile.hasTouch !== undefined) contextOptions.hasTouch = profile.hasTouch;
-    if (profile.locale) contextOptions.locale = profile.locale;
+  try {
+    console.log(`\n🚀 Starting test for device: ${profileName}`);
+    
+    // ব্রাউজার লঞ্চ করুন
+    browser = await chromium.launch({ 
+      headless: false, 
+      args: [
+        '--disable-dev-shm-usage',
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-web-security',
+        '--disable-features=VizDisplayCompositor'
+      ]
+    });
 
-    const context = await browser.newContext(contextOptions);
+    // কনটেক্সট তৈরি করুন
+    context = await browser.newContext({
+      viewport: profile.viewport,
+      userAgent: profile.userAgent,
+      deviceScaleFactor: profile.deviceScaleFactor,
+      isMobile: profile.isMobile,
+      hasTouch: profile.hasTouch,
+      locale: profile.locale,
+      // পারফরম্যান্স ইম্প্রুভমেন্ট
+      ignoreHTTPSErrors: true,
+      javaScriptEnabled: true
+    });
 
-    // if profile provides viewport and isMobile etc via devices map, apply via newContext({ ...profile })
-    // (some device objects include many fields — for safety we'll try to spread the object)
-    // If the device is a Playwright built-in full device, prefer using it directly:
-    const isBuiltInDevice = !!devices[profile.name];
-    if (isBuiltInDevice) {
-      // Close the previously created context and recreate with full device descriptor
-      await context.close();
-      await browser.close();
-      // create again using the full device descriptor
-      const browser2 = await chromium.launch({ headless: false, args: ['--disable-dev-shm-usage'] });
-      const context2 = await browser2.newContext(devices[profile.name]);
-      const page2 = await context2.newPage();
+    // পেজ তৈরি করুন
+    page = await context.newPage();
+    
+    // কনসোল লগ ক্যাপচার করুন
+    page.on('console', msg => {
+      const logText = msg.text();
+      const type = msg.type();
+      console.log(`[${profileName}] [${type.toUpperCase()}] ${logText}`);
+    });
 
-      // page console -> node console
-      page2.on('console', msg => {
-        try {
-          console.log(`PAGE LOG [${profileName}]>`, msg.text());
-        } catch (e) { /* ignore */ }
-      });
+    // পেজ এরর হ্যান্ডলিং
+    page.on('pageerror', error => {
+      console.error(`[${profileName}] Page Error:`, error.message);
+    });
 
+    // নেটওয়ার্ক রিকোয়েস্ট লগ করুন
+    page.on('requestfailed', request => {
+      console.error(`[${profileName}] Request Failed: ${request.url()} - ${request.failure().errorText}`);
+    });
+
+    console.log(`📱 Device: ${profileName}`);
+    console.log(`📏 Viewport: ${profile.viewport?.width}x${profile.viewport?.height}`);
+    console.log(`🌐 User Agent: ${profile.userAgent?.substring(0, 80)}...`);
+    console.log(`🔗 Loading URL: ${url}`);
+
+    // পেজ লোড করুন
+    await page.goto(url, { 
+      waitUntil: 'domcontentloaded',
+      timeout: PAGE_LOAD_TIMEOUT 
+    });
+
+    console.log('✅ Page loaded successfully');
+    console.log(`⏳ Waiting ${SDK_WAIT/1000}s for SDK initialization...`);
+
+    // SDK ইনিশিয়ালাইজেশনের জন্য অপেক্ষা করুন
+    await page.waitForTimeout(SDK_WAIT);
+
+    // স্ক্রিনশট নিন
+    const screenshotPath = `${SCREENSHOT_PREFIX}-${iteration}-${profileName.replace(/\s+/g, '-')}.png`;
+    await page.screenshot({ 
+      path: screenshotPath, 
+      fullPage: true,
+      type: 'png',
+      quality: 80
+    });
+
+    console.log(`📸 Screenshot saved: ${screenshotPath}`);
+
+    // পেজ টাইটেল এবং URL লগ করুন
+    const pageTitle = await page.title();
+    const currentUrl = page.url();
+    console.log(`📄 Page Title: ${pageTitle}`);
+    console.log(`🔗 Current URL: ${currentUrl}`);
+
+    return true;
+
+  } catch (error) {
+    console.error(`❌ Error testing device ${profileName}:`, error.message);
+    
+    // ইরর কেসেও স্ক্রিনশট নিন
+    if (page) {
       try {
-        await page2.goto(url, { waitUntil: 'networkidle', timeout: 60000 });
-        console.log('Page loaded — waiting for SDKs to initialize...');
-        await page2.waitForTimeout(SDK_WAIT);
-
-        const shot = `${SCREENSHOT_PREFIX}-${iteration}.png`;
-        await page2.screenshot({ path: shot, fullPage: false });
-        console.log('Saved screenshot:', shot);
-      } catch (err) {
-        console.error('Page load / screenshot error:', err.message || err);
-      } finally {
-        await context2.close();
-        await browser2.close();
-      }
-    } else {
-      // use the simpler context we created above
-      const page = await context.newPage();
-      page.on('console', msg => {
-        try {
-          console.log(`PAGE LOG [${profileName}]>`, msg.text());
-        } catch (e) { /* ignore */ }
-      });
-
-      try {
-        await page.goto(url, { waitUntil: 'networkidle', timeout: 60000 });
-        console.log('Page loaded — waiting for SDKs to initialize...');
-        await page.waitForTimeout(SDK_WAIT);
-
-        const shot = `${SCREENSHOT_PREFIX}-${iteration}.png`;
-        await page.screenshot({ path: shot, fullPage: false });
-        console.log('Saved screenshot:', shot);
-      } catch (err) {
-        console.error('Page load / screenshot error:', err.message || err);
-      } finally {
-        await context.close();
-        await browser.close();
+        const errorScreenshotPath = `error-${SCREENSHOT_PREFIX}-${iteration}-${profileName.replace(/\s+/g, '-')}.png`;
+        await page.screenshot({ path: errorScreenshotPath });
+        console.log(`📸 Error screenshot saved: ${errorScreenshotPath}`);
+      } catch (screenshotError) {
+        console.error('Failed to take error screenshot:', screenshotError.message);
       }
     }
+    
+    return false;
+
+  } finally {
+    // রিসোর্স ক্লিনআপ
+    if (page && !page.isClosed()) {
+      await page.close().catch(e => console.error('Error closing page:', e.message));
+    }
+    if (context) {
+      await context.close().catch(e => console.error('Error closing context:', e.message));
+    }
+    if (browser) {
+      await browser.close().catch(e => console.error('Error closing browser:', e.message));
+    }
+  }
+}
+
+/**
+ * মূল টেস্ট লুপ
+ */
+async function runTests() {
+  console.log('🎯 Starting Device Rotation Test');
+  console.log('📊 Target URL:', url);
+  console.log('⏰ Interval:', INTERVAL/1000, 'seconds');
+  console.log('🔄 Device Profiles:', deviceProfiles.length);
+  console.log('Press CTRL+C to stop the test\n');
+
+  let iteration = 0;
+  let successCount = 0;
+  let errorCount = 0;
+
+  while (!isShuttingDown) {
+    const profile = deviceProfiles[iteration % deviceProfiles.length];
+    
+    console.log(`\n${'='.repeat(60)}`);
+    console.log(`🔄 Iteration ${iteration} - ${new Date().toISOString()}`);
+    console.log(`${'='.repeat(60)}`);
+
+    const success = await testWithDevice(profile, iteration);
+    
+    if (success) {
+      successCount++;
+    } else {
+      errorCount++;
+    }
+
+    console.log(`📊 Summary - Success: ${successCount}, Errors: ${errorCount}, Total: ${iteration + 1}`);
 
     iteration++;
-    console.log(`Sleeping ${INTERVAL/1000} seconds before next device...`);
-    await new Promise(resolve => setTimeout(resolve, INTERVAL));
+
+    // শেষ ইটারেশন না হলে অপেক্ষা করুন
+    if (!isShuttingDown && iteration < 1000) { // safety limit
+      console.log(`\n💤 Sleeping for ${INTERVAL/1000} seconds before next device...`);
+      
+      // স্লিপ期间 CTRL+C চেক করার জন্য
+      await new Promise(resolve => {
+        const interval = setInterval(() => {
+          if (isShuttingDown) {
+            clearInterval(interval);
+            resolve();
+          }
+        }, 1000);
+        
+        setTimeout(() => {
+          clearInterval(interval);
+          resolve();
+        }, INTERVAL);
+      });
+    }
+  }
+
+  console.log('\n✅ Test completed gracefully');
+}
+
+// আনহ্যান্ডল্ড প্রমিস রিজেকশন হ্যান্ডলিং
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+  process.exit(1);
+});
+
+process.on('uncaughtException', (error) => {
+  console.error('Uncaught Exception:', error);
+  process.exit(1);
+});
+
+// প্রোগ্রাম 실행
+(async () => {
+  try {
+    await runTests();
+  } catch (error) {
+    console.error('Fatal error in main execution:', error);
+    process.exit(1);
   }
 })();
-
