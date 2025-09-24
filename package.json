@@ -1,0 +1,15 @@
+{
+  "name": "device-rotate-test",
+  "version": "1.0.0",
+  "description": "Playwright device rotation test — opens URL with different device emulations every minute",
+  "main": "device-rotate-test.js",
+  "scripts": {
+    "start": "node device-rotate-test.js"
+  },
+  "devDependencies": {
+    "playwright": "^1.36.0"
+  },
+  "author": "",
+  "license": "MIT"
+}
+
