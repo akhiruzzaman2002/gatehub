@@ -1,18 +1,20 @@
-# gatehub
+# Device-Rotate Test (Playwright)
 
-Simple static test page for Start.io banner + Moniteg link.
+This project opens a target URL repeatedly with different device emulations (every 60 seconds),
+captures a screenshot and prints page console logs. Useful for testing SDKs (Start.io, Moniteg)
+and verifying banner rendering on different device profiles.
 
 ## Files
-- `index.html` — প্রধান টেস্ট পেজ (edit APP_ID and MONITEG_LINK inside).
-- `CNAME` — optional, add your custom domain (e.g. start.oi).
+- `package.json` — project metadata and dev dependency (playwright)
+- `device-rotate-test.js` — main test script
+- `.gitignore` — ignore node_modules and screenshots
+- `README.md` — this file
 
-## Usage
-1. Replace placeholders in `index.html`:
-   - `APP_ID` → your Start.io App ID
-   - `MONITEG_LINK` → your Moniteg direct link (tracking URL)
-2. Commit & push to GitHub.
-3. Enable GitHub Pages (Settings → Pages → Source: `main` branch root).
-4. Open the published URL and test (use DevTools Console to inspect logs).
+## Setup & Run
 
-**Important:** This page is for testing only. Do not use it to generate fake impressions or fraudulent traffic.
+1. Install Node.js (v16+ recommended).
+
+2. Clone or copy this project folder, then install dependencies:
+   ```bash
+   npm install
 
